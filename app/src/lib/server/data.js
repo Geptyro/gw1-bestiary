@@ -9,7 +9,7 @@ function findOut() {
 	if (process.env.GW1_OUT) return process.env.GW1_OUT;
 	const candidates = [
 		path.resolve(process.cwd(), '..', 'out'),
-		'/workspace/pro/gw1-sprites/out'
+		'/workspace/pro/gw1-bestiary/out'
 	];
 	for (const c of candidates) {
 		if (fs.existsSync(path.join(c, 'classifications.csv'))) return c;

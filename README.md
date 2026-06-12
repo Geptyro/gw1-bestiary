@@ -52,9 +52,8 @@ validated set ──(build_dist.py)──> deliverable            dist/npc.jsonl
 build_dist.py        build the deliverable from validated state
 app/                 SvelteKit admin (gallery + wiki linking)
 gwmb_addon/          patched GWMB Blender import addon
-scripts/             pipeline tools (render, scan, classify, contact sheets)
+scripts/             pipeline tools (render, scan, classify)
 scripts/wiki/        wiki icon corpus tooling (items — site-bound)
-scripts/legacy/      retired (python gallery server, auto-validation dead end)
 out/                 working state: validation.json, links.json, *.csv (tracked);
                      scan/, hires/ sprite caches (untracked)
 dist/                deliverable (untracked, regenerable)

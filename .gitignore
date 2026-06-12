@@ -14,3 +14,7 @@ app/build/
 
 nohup.out
 __pycache__/
+
+# extracted game art stays local (fan-use norm: no public redistribution)
+out/*.png
+out/*.jpg

@@ -1,8 +1,0 @@
-/mnt/c/gwmb-export/model_0x1B093_gwmb.json
-/mnt/c/gwmb-export/model_0x1B09A_gwmb.json
-/mnt/c/gwmb-export/model_0x1B0A1_gwmb.json
-/mnt/c/gwmb-export/model_0x1B0A8_gwmb.json
-/mnt/c/gwmb-export/model_0x1B0AF_gwmb.json
-/mnt/c/gwmb-export/model_0x1B0B6_gwmb.json
-/mnt/c/gwmb-export/model_0x1B10D_gwmb.json
-/mnt/c/gwmb-export/model_0x1B114_gwmb.json
