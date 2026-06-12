@@ -1,0 +1,1053 @@
+diff -ruN '--exclude=Release' '--exclude=Debug' '--exclude=.vs' /tmp/gwmb-research/SourceFiles/batch_export.h /mnt/c/gwmb-batch/src/SourceFiles/batch_export.h
+--- /tmp/gwmb-research/SourceFiles/batch_export.h	1970-01-01 01:00:00.000000000 +0100
++++ /mnt/c/gwmb-batch/src/SourceFiles/batch_export.h	2026-06-12 11:15:32.441160100 +0200
+@@ -0,0 +1,32 @@
++#pragma once
++#include <atomic>
++#include <string>
++
++// Command-line driven batch export:
++//   GuildWarsMapBrowser.exe --dat "C:\...\Gw.dat" --export-models-dir "C:\out"
++//                           [--export-icons-dir "C:\icons"] [--exit-when-done]
++// The model export runs chunked on the render thread once the dat finishes loading,
++// because texture decoding goes through the D3D11 device owned by that thread.
++// The inventory-icon export is CPU-only and runs on a worker thread afterwards.
++inline std::wstring g_batch_export_dir = L"";
++inline bool g_batch_export_requested = false;
++inline bool g_batch_export_exit_when_done = false;
++inline std::wstring g_batch_icons_dir = L"";
++inline bool g_batch_icons_started = false;
++inline std::atomic<bool> g_batch_icons_done{false};
++// Pose-baked model export (see posed_export.h):
++//   --export-posed <hash-list.txt> [--anim-fraction <0..1, default 0>]
++// Exports model_0x{hash}_posed_gwmb.json into --export-models-dir with an idle
++// animation pose baked into the vertices. When a posed list is given the full
++// batch export over all FFNA_Type2 files is suppressed (g_batch_posed_only).
++inline std::wstring g_batch_posed_list_path = L"";
++inline bool g_batch_posed_requested = false;
++inline float g_batch_anim_fraction = 0.0f;
++// Set when --export-posed was passed: --export-models-dir then only names the
++// output dir and must not trigger the full batch loop.
++inline bool g_batch_posed_only = false;
++// Single-pass model<->animation chunk index dump (see posed_export.h anim_index):
++//   --dump-anim-index <out.csv>
++inline std::wstring g_batch_anim_index_path = L"";
++// True when any batch flag was passed: suppresses blocking UI (crash dialog).
++inline bool g_batch_unattended = false;
+diff -ruN '--exclude=Release' '--exclude=Debug' '--exclude=.vs' /tmp/gwmb-research/SourceFiles/Main.cpp /mnt/c/gwmb-batch/src/SourceFiles/Main.cpp
+--- /tmp/gwmb-research/SourceFiles/Main.cpp	2026-06-11 20:44:39.252398854 +0200
++++ /mnt/c/gwmb-batch/src/SourceFiles/Main.cpp	2026-06-12 11:15:38.584278000 +0200
+@@ -10,6 +10,9 @@
+ #include "imgui.h"
+ #include <filesystem>
+ #include <DbgHelp.h>
++#include <shellapi.h>
++#include "batch_export.h"
++#include "draw_gui_for_open_dat_file.h"
+ 
+ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* pExceptionPointers) {
+     // Create mini dump file
+@@ -95,7 +98,10 @@
+     free(symbol);
+     SymCleanup(process);
+ 
+-    MessageBoxA(NULL, ss.str().c_str(), "Critical Error", MB_ICONERROR | MB_OK);
++    // In unattended batch mode a modal dialog would hang the run forever;
++    // exit so a supervisor can restart us (the batch skip list handles the rest).
++    if (!g_batch_unattended)
++        MessageBoxA(NULL, ss.str().c_str(), "Critical Error", MB_ICONERROR | MB_OK);
+ 
+     ExitProcess(pExceptionPointers->ExceptionRecord->ExceptionCode);
+ 
+@@ -262,6 +268,64 @@
+     if (FAILED(hr))
+         return 1;
+ 
++    // Batch export command line:
++    //   --dat <path-to-Gw.dat> --export-models-dir <output-dir> [--exit-when-done]
++    //   [--export-posed <hash-list.txt>] [--anim-fraction <0..1>]
++    {
++        int argc = 0;
++        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
++        if (argv)
++        {
++            for (int i = 1; i < argc; i++)
++            {
++                const std::wstring arg = argv[i];
++                if (arg == L"--dat" && i + 1 < argc)
++                {
++                    gw_dat_path = argv[++i];
++                    gw_dat_path_set = true;
++                }
++                else if (arg == L"--export-models-dir" && i + 1 < argc)
++                {
++                    g_batch_export_dir = argv[++i];
++                    g_batch_export_requested = true;
++                    g_batch_unattended = true;
++                }
++                else if (arg == L"--export-icons-dir" && i + 1 < argc)
++                {
++                    g_batch_icons_dir = argv[++i];
++                    g_batch_unattended = true;
++                }
++                else if (arg == L"--export-posed" && i + 1 < argc)
++                {
++                    g_batch_posed_list_path = argv[++i];
++                    g_batch_posed_requested = true;
++                    g_batch_unattended = true;
++                }
++                else if (arg == L"--anim-fraction" && i + 1 < argc)
++                {
++                    g_batch_anim_fraction = static_cast<float>(wcstod(argv[++i], nullptr));
++                }
++                else if (arg == L"--dump-anim-index" && i + 1 < argc)
++                {
++                    g_batch_anim_index_path = argv[++i];
++                    g_batch_unattended = true;
++                }
++                else if (arg == L"--exit-when-done")
++                {
++                    g_batch_export_exit_when_done = true;
++                }
++            }
++            LocalFree(argv);
++
++            // A posed list turns --export-models-dir into the output dir for the
++            // posed export only: suppress the full batch over all FFNA_Type2 files.
++            if (g_batch_posed_requested && g_batch_export_requested)
++            {
++                g_batch_posed_only = true;
++                g_batch_export_requested = false;
++            }
++        }
++    }
+ 
+     // Register class and create window
+     {
+diff -ruN '--exclude=Release' '--exclude=Debug' '--exclude=.vs' /tmp/gwmb-research/SourceFiles/MapBrowser.cpp /mnt/c/gwmb-batch/src/SourceFiles/MapBrowser.cpp
+--- /tmp/gwmb-research/SourceFiles/MapBrowser.cpp	2026-06-11 20:44:39.252398854 +0200
++++ /mnt/c/gwmb-batch/src/SourceFiles/MapBrowser.cpp	2026-06-12 11:17:03.652605300 +0200
+@@ -10,6 +10,14 @@
+ #include "draw_ui.h"
+ #include "animation_state.h"
+ #include "ModelViewer/ModelViewer.h"
++#include "batch_export.h"
++#include "posed_export.h"
++#include "model_exporter.h"
++#include "FFNA_ModelFile_Other.h"
++#include "DirectXTex/DirectXTex.h"
++#include <format>
++#include <fstream>
++#include <thread>
+ 
+ extern void ExitMapBrowser() noexcept;
+ 
+@@ -97,7 +105,9 @@
+ void MapBrowser::Tick()
+ {
+     // Check if extraction is in progress; if so, don't skip frames
+-    bool is_extracting = !m_mft_indices_to_extract.empty() || !m_mft_indices_to_extract_textures.empty();
++    bool is_extracting = !m_mft_indices_to_extract.empty() || !m_mft_indices_to_extract_textures.empty() ||
++        g_batch_export_requested || g_batch_posed_requested || !g_batch_anim_index_path.empty() ||
++        (!g_batch_icons_dir.empty() && !g_batch_icons_done.load());
+ 
+     if (!is_extracting) {
+         if (IsIconic(m_deviceResources->GetWindow())) {
+@@ -163,6 +173,220 @@
+         m_hash_index_initialized = true;
+     }
+ 
++    // Batch model export (command-line driven, see batch_export.h). Runs chunked on
++    // this thread: texture decode goes through the D3D11 device the render loop owns,
++    // so we export a slice per frame instead of using a worker thread.
++    if (g_batch_export_requested && !g_batch_posed_only && m_hash_index_initialized &&
++        m_dat_managers[0]->m_initialization_state == InitializationState::Completed)
++    {
++        static bool batch_started = false;
++        static size_t batch_cursor = 0;
++        static int batch_total = 0, batch_ok = 0, batch_failed = 0, batch_skipped_other = 0;
++        static int batch_last_logged = 0;
++        static std::ofstream batch_log;
++
++        auto* dat_manager = m_dat_managers[0].get();
++        const auto& mft = dat_manager->get_MFT();
++
++        static std::unordered_set<unsigned int> batch_skip_hashes;
++        static std::filesystem::path batch_marker_path;
++
++        if (!batch_started)
++        {
++            batch_started = true;
++            std::filesystem::create_directories(g_batch_export_dir);
++            // Crash recovery: a previous run that died mid-file left its hash in
++            // _current.txt — move it to the persistent skip list so we never retry it.
++            batch_marker_path = std::filesystem::path(g_batch_export_dir) / "_current.txt";
++            const auto skip_path = std::filesystem::path(g_batch_export_dir) / "_skip.txt";
++            if (std::filesystem::exists(batch_marker_path))
++            {
++                std::string poison;
++                {
++                    std::ifstream cur(batch_marker_path);
++                    std::getline(cur, poison);
++                }
++                if (!poison.empty())
++                {
++                    std::ofstream skip(skip_path, std::ios::app);
++                    skip << poison << "\n";
++                }
++            }
++            {
++                std::ifstream skip(skip_path);
++                std::string line;
++                while (std::getline(skip, line))
++                {
++                    if (!line.empty())
++                        batch_skip_hashes.insert(static_cast<unsigned int>(std::stoull(line, nullptr, 16)));
++                }
++            }
++            batch_log.open(std::filesystem::path(g_batch_export_dir) / "_batch_export_log.txt", std::ios::app);
++            for (const auto& e : mft)
++            {
++                if (e.type == FFNA_Type2) batch_total++;
++            }
++            batch_log << "run start: " << batch_total << " FFNA_Type2 of " << mft.size()
++                      << " files, " << batch_skip_hashes.size() << " hashes on skip list\n" << std::flush;
++        }
++
++        constexpr int models_per_frame = 50;
++        int processed_this_frame = 0;
++        while (batch_cursor < mft.size() && processed_this_frame < models_per_frame)
++        {
++            const size_t i = batch_cursor++;
++            if (mft[i].type != FFNA_Type2) continue;
++            processed_this_frame++;
++            try
++            {
++                if (batch_skip_hashes.count(mft[i].Hash))
++                {
++                    batch_failed++;
++                    continue;
++                }
++                const auto filename = std::format(L"model_0x{:X}_gwmb.json", mft[i].Hash);
++                if (std::filesystem::exists(std::filesystem::path(g_batch_export_dir) / filename))
++                {
++                    // Already exported by a previous run — skip without parsing the
++                    // dat file (export_model would parse first and check second).
++                    batch_ok++;
++                    continue;
++                }
++                if (dat_manager->is_other_model_format(static_cast<int>(i)))
++                {
++                    batch_skipped_other++;
++                    continue;
++                }
++                {
++                    // Marker for crash recovery: names the file being attempted.
++                    std::ofstream cur(batch_marker_path, std::ios::trunc);
++                    cur << std::format("{:X}", mft[i].Hash);
++                }
++                if (model_exporter::export_model(g_batch_export_dir, filename, static_cast<int>(i),
++                                                 dat_manager, m_hash_index,
++                                                 m_map_renderer->GetTextureManager()))
++                    batch_ok++;
++                else
++                    batch_failed++;
++            }
++            catch (...)
++            {
++                batch_failed++;
++            }
++        }
++
++        const int done_count = batch_ok + batch_failed + batch_skipped_other;
++        if (done_count - batch_last_logged >= 1000 || batch_cursor >= mft.size())
++        {
++            batch_last_logged = done_count;
++            batch_log << "progress: " << done_count << "/" << batch_total << " (ok " << batch_ok
++                      << ", failed " << batch_failed << ", skipped_other " << batch_skipped_other
++                      << ")\n" << std::flush;
++        }
++
++        if (batch_cursor >= mft.size())
++        {
++            batch_log << "DONE\n" << std::flush;
++            batch_log.close();
++            std::error_code ec;
++            std::filesystem::remove(batch_marker_path, ec);
++            g_batch_export_requested = false;
++        }
++    }
++
++    // Pose-baked model export (command-line driven, see posed_export.h). Runs
++    // synchronously on this thread once the dat is loaded: texture decode goes
++    // through the D3D11 device the render loop owns, and posed lists are short.
++    if (g_batch_posed_requested && !g_batch_export_requested && m_hash_index_initialized &&
++        m_dat_managers[0]->m_initialization_state == InitializationState::Completed)
++    {
++        try
++        {
++            posed_export::run(g_batch_export_dir, g_batch_posed_list_path, g_batch_anim_fraction,
++                              m_dat_managers[0].get(), m_hash_index,
++                              m_map_renderer->GetTextureManager());
++        }
++        catch (...)
++        {
++        }
++        g_batch_posed_requested = false;
++    }
++
++    // Model<->animation chunk index dump (header-only single pass, see anim_index::dump).
++    if (!g_batch_anim_index_path.empty() && m_hash_index_initialized &&
++        !g_batch_export_requested && !g_batch_posed_requested &&
++        m_dat_managers[0]->m_initialization_state == InitializationState::Completed)
++    {
++        try
++        {
++            anim_index::dump(g_batch_anim_index_path, m_dat_managers[0].get());
++        }
++        catch (...)
++        {
++        }
++        g_batch_anim_index_path.clear();
++    }
++
++    // Inventory-icon batch export (CPU-only, worker thread). Starts once the dat is
++    // loaded and the model pass (if any) has finished, to avoid concurrent dat reads.
++    if (!g_batch_icons_dir.empty() && !g_batch_icons_started && m_hash_index_initialized &&
++        !g_batch_export_requested && !g_batch_posed_requested &&
++        m_dat_managers[0]->m_initialization_state == InitializationState::Completed)
++    {
++        g_batch_icons_started = true;
++        auto* dat_manager = m_dat_managers[0].get();
++        std::thread([dat_manager]() {
++            std::filesystem::create_directories(g_batch_icons_dir);
++            const auto& mft = dat_manager->get_MFT();
++            int saved = 0;
++            for (size_t i = 0; i < mft.size(); ++i)
++            {
++                if (mft[i].type != FFNA_Type2) continue;
++                try
++                {
++                    if (!dat_manager->is_other_model_format(static_cast<int>(i))) continue;
++                    auto model = dat_manager->parse_ffna_model_file_other(static_cast<int>(i));
++                    if (!model.has_inline_textures) continue;
++                    auto inline_textures = model.GetAllInlineTextures();
++                    for (size_t tex_idx = 0; tex_idx < inline_textures.size(); ++tex_idx)
++                    {
++                        const auto& tex = inline_textures[tex_idx];
++                        if (tex.width <= 0 || tex.height <= 0 || tex.rgba_data.empty()) continue;
++                        const std::wstring filename = inline_textures.size() > 1
++                            ? std::format(L"itemIcon_{}_{}.png", mft[i].Hash, tex_idx)
++                            : std::format(L"itemIcon_{}.png", mft[i].Hash);
++                        const auto filepath = std::filesystem::path(g_batch_icons_dir) / filename;
++                        if (std::filesystem::exists(filepath)) continue;
++                        DirectX::Image image;
++                        image.width = tex.width;
++                        image.height = tex.height;
++                        image.format = DXGI_FORMAT_B8G8R8A8_UNORM;
++                        image.rowPitch = tex.width * 4;
++                        image.slicePitch = image.rowPitch * tex.height;
++                        image.pixels = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(tex.rgba_data.data()));
++                        if (SUCCEEDED(DirectX::SaveToWICFile(image, DirectX::WIC_FLAGS_FORCE_SRGB,
++                                DirectX::GetWICCodec(DirectX::WIC_CODEC_PNG), filepath.c_str())))
++                            saved++;
++                    }
++                }
++                catch (...)
++                {
++                }
++            }
++            std::ofstream done_log(std::filesystem::path(g_batch_icons_dir) / "_icons_done.txt");
++            done_log << "saved " << saved << "\n";
++            g_batch_icons_done.store(true);
++        }).detach();
++    }
++
++    // Quit once all requested batch work has completed.
++    if (g_batch_export_exit_when_done && !g_batch_export_requested && !g_batch_posed_requested &&
++        g_batch_anim_index_path.empty() &&
++        (g_batch_icons_dir.empty() || g_batch_icons_done.load()))
++    {
++        g_batch_export_exit_when_done = false;
++        PostQuitMessage(0);
++    }
+ 
+     // Update model viewer if active
+     float deltaSeconds = static_cast<float>(elapsed.count() / 1000.0);
+diff -ruN '--exclude=Release' '--exclude=Debug' '--exclude=.vs' /tmp/gwmb-research/SourceFiles/posed_export.h /mnt/c/gwmb-batch/src/SourceFiles/posed_export.h
+--- /tmp/gwmb-research/SourceFiles/posed_export.h	1970-01-01 01:00:00.000000000 +0100
++++ /mnt/c/gwmb-batch/src/SourceFiles/posed_export.h	2026-06-12 13:31:36.875632100 +0200
+@@ -0,0 +1,657 @@
++#pragma once
++// Pose-baked model export (command-line driven, see batch_export.h):
++//   GuildWarsMapBrowser.exe --dat "C:\...\Gw.dat" --export-models-dir "C:\out"
++//                           --export-posed "C:\hashes.txt" [--anim-fraction 0.25]
++//                           [--exit-when-done]
++//
++// The list file contains one model file hash per line (hex, e.g. 0x1B093).
++// For each model the idle animation is located (same file first, then a
++// full-MFT scan for a BB9/BB8/FA1/FA0 chunk whose model signature matches the
++// model's FA0 signature words), the skinning palette is evaluated at
++//   time = segment.startTime + anim_fraction * (segment.endTime - startTime)
++// and the vertex positions/normals/tangents/bitangents are transformed in
++// place before the regular JSON exporter runs. The JSON schema is unchanged
++// and contains no rig; the output file is model_0x{HASH}_posed_gwmb.json.
++// Models without any animation are still exported (unposed) under the _posed
++// name so downstream tooling gets a uniform file list.
++
++#include <DATManager.h>
++#include <TextureManager.h>
++#include "model_exporter.h"
++#include "animation_state.h"
++#include "Animation/AnimationClip.h"
++#include "Animation/AnimationEvaluator.h"
++#include "Parsers/BB9AnimationParser.h"
++
++#include <DirectXMath.h>
++#include <cstdint>
++#include <filesystem>
++#include <format>
++#include <fstream>
++#include <optional>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++namespace posed_export
++{
++
++// Best-effort narrowing for log output (paths may contain non-ASCII).
++inline std::string narrow(const std::wstring& w)
++{
++    std::string s;
++    s.reserve(w.size());
++    for (const wchar_t c : w)
++        s.push_back(c < 128 ? static_cast<char>(c) : '?');
++    return s;
++}
++
++// Scans one FFNA file's chunks for an animation chunk whose model signature
++// matches. Mirrors CheckFileForMatchingAnimation (animation_state.cpp) but
++// also accepts the BB8/FA0 variants that ParseAnimationFromFile understands.
++// On success returns the chunk's data offset/size and whether it uses the
++// 88-byte FA-style header.
++inline bool find_matching_animation_chunk(const uint8_t* data, size_t data_size,
++                                          uint32_t target_hash0, uint32_t target_hash1,
++                                          size_t& out_chunk_offset, size_t& out_chunk_size,
++                                          bool& out_is_fa_chunk)
++{
++    if (data_size < 5 + 8 + sizeof(GW::Parsers::BB9Header))
++        return false;
++    if (data[0] != 'f' || data[1] != 'f' || data[2] != 'n' || data[3] != 'a')
++        return false;
++
++    size_t offset = 5;
++    while (offset + 8 <= data_size)
++    {
++        uint32_t chunk_id, chunk_size;
++        std::memcpy(&chunk_id, &data[offset], sizeof(uint32_t));
++        std::memcpy(&chunk_size, &data[offset + 4], sizeof(uint32_t));
++
++        if (chunk_id == 0 || chunk_size == 0)
++            break;
++
++        const size_t chunk_data_offset = offset + 8;
++        if (chunk_data_offset + chunk_size > data_size)
++            break;
++
++        if (chunk_id == GW::Parsers::CHUNK_ID_BB9 || chunk_id == GW::Parsers::CHUNK_ID_BB8)
++        {
++            if (chunk_data_offset + sizeof(GW::Parsers::BB9Header) <= data_size)
++            {
++                GW::Parsers::BB9Header header;
++                std::memcpy(&header, &data[chunk_data_offset], sizeof(header));
++                if (header.modelHash0 == target_hash0 && header.modelHash1 == target_hash1)
++                {
++                    out_chunk_offset = chunk_data_offset;
++                    out_chunk_size = chunk_size;
++                    out_is_fa_chunk = false;
++                    return true;
++                }
++            }
++        }
++        else if (chunk_id == GW::Parsers::CHUNK_ID_FA1 || chunk_id == GW::Parsers::CHUNK_ID_FA0)
++        {
++            if (chunk_data_offset + sizeof(GW::Parsers::FA1Header) <= data_size)
++            {
++                GW::Parsers::FA1Header header;
++                std::memcpy(&header, &data[chunk_data_offset], sizeof(header));
++                // FA headers use boundingBoxId/collisionMeshId as the model signature.
++                if (header.boundingBoxId == target_hash0 && header.collisionMeshId == target_hash1)
++                {
++                    out_chunk_offset = chunk_data_offset;
++                    out_chunk_size = chunk_size;
++                    out_is_fa_chunk = true;
++                    return true;
++                }
++            }
++        }
++
++        offset += 8 + chunk_size;
++    }
++
++    return false;
++}
++
++// (a) Try the model's own file (mirrors TryLoadAnimationFromSameFile minus the
++// global UI state changes).
++inline std::optional<GW::Animation::AnimationClip> load_clip_from_same_file(
++    DATManager* dat_manager, int mft_index)
++{
++    const auto& mft = dat_manager->get_MFT();
++    unsigned char* file_data = dat_manager->read_file(mft_index);
++    if (!file_data)
++        return std::nullopt;
++
++    std::optional<GW::Animation::AnimationClip> clip;
++    try
++    {
++        clip = GW::Parsers::ParseAnimationFromFile(file_data, mft[mft_index].uncompressedSize);
++    }
++    catch (...)
++    {
++        clip.reset();
++    }
++    delete[] file_data;
++
++    if (clip && clip->IsValid())
++        return clip;
++    return std::nullopt;
++}
++
++// (b) Fallback: scan every FFNA_Type2 entry in the MFT for an animation chunk
++// whose signature words match the model's (FA0 sub_1.f0xC / f0x10).
++inline std::optional<GW::Animation::AnimationClip> scan_mft_for_animation(
++    DATManager* dat_manager, uint32_t model_hash0, uint32_t model_hash1,
++    int skip_mft_index, int& out_donor_file_hash)
++{
++    const auto& mft = dat_manager->get_MFT();
++    for (size_t i = 0; i < mft.size(); ++i)
++    {
++        if (static_cast<int>(i) == skip_mft_index)
++            continue;
++        if (mft[i].type != FFNA_Type2 || mft[i].uncompressedSize < 57)
++            continue;
++
++        unsigned char* file_data = nullptr;
++        try
++        {
++            file_data = dat_manager->read_file(static_cast<int>(i));
++        }
++        catch (...)
++        {
++            file_data = nullptr;
++        }
++        if (!file_data)
++            continue;
++
++        std::optional<GW::Animation::AnimationClip> clip;
++        try
++        {
++            size_t chunk_offset = 0, chunk_size = 0;
++            bool is_fa_chunk = false;
++            if (find_matching_animation_chunk(file_data,
++                                              static_cast<size_t>(mft[i].uncompressedSize),
++                                              model_hash0, model_hash1,
++                                              chunk_offset, chunk_size, is_fa_chunk))
++            {
++                clip = is_fa_chunk
++                    ? GW::Parsers::BB9AnimationParser::ParseFA1(file_data + chunk_offset, chunk_size)
++                    : GW::Parsers::BB9AnimationParser::Parse(file_data + chunk_offset, chunk_size);
++            }
++        }
++        catch (...)
++        {
++            clip.reset();
++        }
++        delete[] file_data;
++
++        if (clip && clip->IsValid())
++        {
++            out_donor_file_hash = mft[i].Hash;
++            return clip;
++        }
++    }
++    return std::nullopt;
++}
++
++struct PoseTimePick
++{
++    bool from_segment = false; // false -> whole-clip time range was used
++    size_t segment_index = 0;
++    uint32_t segment_hash = 0;
++    bool is_idle = false;
++    float time = 0.0f; // animation units (100000 = 1 second)
++};
++
++// Picks the pose time: first local idle segment if present, else the first
++// local segment (else segment 0), else the whole clip range. Idle detection
++// mirrors AnimationPanelState::Initialize (animation_state.h).
++inline PoseTimePick pick_pose_time(const GW::Animation::AnimationClip& clip, float fraction)
++{
++    static constexpr uint32_t kKnownIdleSegmentHashes[] = {
++        0x8985FC26u, // Idle (RH open. LH closed)
++        0x8985FC2Cu, // Idle (2H Carrying flag)
++        0x8985FC36u, // Idle (Both hands closed)
++        0x8985FC38u, // Idle (Both hands open)
++        0x8935FC39u, // Idle (RH closed. LH open)
++        0x33E48DF5u, // Idle/Stand (fallback hash seen in some files)
++        0x33E48D3Cu, // Idle Variant
++        0x33E46F23u  // Idle Variant 2
++    };
++
++    const auto& segments = clip.animationSegments;
++    const bool has_source_types = (clip.animationSegmentSourceTypes.size() == segments.size());
++    const size_t kNotFound = static_cast<size_t>(-1);
++
++    auto is_local_playable = [&](size_t idx) -> bool
++    {
++        return !has_source_types || clip.GetSegmentSourceType(idx) == 0;
++    };
++
++    auto is_idle_hash = [&](uint32_t hash) -> bool
++    {
++        for (const uint32_t known : kKnownIdleSegmentHashes)
++        {
++            if (known == hash)
++                return true;
++        }
++        return GW::Animation::AnimationHashLookup::Instance().GetAnimationCategory(hash) == "Idle";
++    };
++
++    size_t chosen = kNotFound;
++    bool chosen_is_idle = false;
++    for (size_t i = 0; i < segments.size(); ++i)
++    {
++        if (is_local_playable(i) && is_idle_hash(segments[i].hash))
++        {
++            chosen = i;
++            chosen_is_idle = true;
++            break;
++        }
++    }
++    if (chosen == kNotFound)
++    {
++        for (size_t i = 0; i < segments.size(); ++i)
++        {
++            if (is_local_playable(i))
++            {
++                chosen = i;
++                break;
++            }
++        }
++    }
++    if (chosen == kNotFound && !segments.empty())
++        chosen = 0;
++
++    PoseTimePick pick;
++    if (chosen != kNotFound)
++    {
++        const auto& seg = segments[chosen];
++        pick.from_segment = true;
++        pick.segment_index = chosen;
++        pick.segment_hash = seg.hash;
++        pick.is_idle = chosen_is_idle;
++        pick.time = static_cast<float>(seg.startTime) +
++            fraction * (static_cast<float>(seg.endTime) - static_cast<float>(seg.startTime));
++    }
++    else
++    {
++        // No segment metadata: sample the whole clip range.
++        pick.time = clip.minTime + fraction * (clip.maxTime - clip.minTime);
++    }
++    return pick;
++}
++
++inline void transform_normal_in_place(const DirectX::XMMATRIX& m, float& x, float& y, float& z)
++{
++    using namespace DirectX;
++    XMVECTOR v = XMVector3TransformNormal(XMVectorSet(x, y, z, 0.0f), m);
++    if (XMVectorGetX(XMVector3Length(v)) > 1e-6f)
++        v = XMVector3Normalize(v);
++    x = XMVectorGetX(v);
++    y = XMVectorGetY(v);
++    z = XMVectorGetZ(v);
++}
++
++// Bakes the evaluated pose into the parsed model's vertices. Mesh vertices and
++// animation data share the GWMB coordinate space (both apply the GW->GWMB
++// (x,-z,y) transform at parse time), so no fixup is needed. The skinning
++// matrices are rigid (T(-bind)*R*T(final)), so normals/tangents transform with
++// XMVector3TransformNormal. Returns the number of skinning matrices used.
++inline size_t bake_pose_into_model(FFNA_ModelFile& model,
++                                   const GW::Animation::AnimationClip& clip, float time)
++{
++    using namespace DirectX;
++
++    GW::Animation::AnimationEvaluator evaluator;
++    std::vector<XMFLOAT4X4> matrices;
++    evaluator.ComputeSkinningFromHierarchy(clip, time, matrices, false);
++    if (matrices.empty())
++        return 0;
++
++    // Validation count used by AnimationPanelState::CreateSkinnedVertices.
++    const size_t bone_count = clip.boneTracks.size();
++
++    for (auto& gm : model.geometry_chunk.models)
++    {
++        // u0 = bone_group_count, u1 = total_bone_refs (see draw_dat_browser.cpp).
++        const auto bone_data = AnimationPanelState::ExtractBoneData(gm.extra_data, gm.u0, gm.u1);
++
++        // Direct-vs-palette fallback copied from CreateSkinnedVertices.
++        uint32_t max_vertex_bone_idx = 0;
++        for (const auto& mv : gm.vertices)
++        {
++            const uint32_t grp = mv.has_group ? mv.group : 0;
++            if (grp > max_vertex_bone_idx)
++                max_vertex_bone_idx = grp;
++        }
++        bool use_direct_indices = false;
++        if (bone_data.groupToSkeletonBone.empty())
++        {
++            use_direct_indices = true;
++        }
++        else if (max_vertex_bone_idx >= bone_data.groupToSkeletonBone.size() &&
++                 max_vertex_bone_idx < bone_count)
++        {
++            use_direct_indices = true;
++        }
++
++        for (auto& mv : gm.vertices)
++        {
++            const uint32_t group_idx = mv.has_group ? mv.group : 0;
++            uint32_t skel_bone;
++            if (use_direct_indices)
++            {
++                skel_bone = group_idx < bone_count ? group_idx : 0;
++            }
++            else
++            {
++                skel_bone = bone_data.MapGroupToSkeletonBone(group_idx);
++                if (skel_bone >= bone_count && bone_count > 0)
++                    skel_bone = skel_bone % static_cast<uint32_t>(bone_count);
++            }
++
++            // The skinned shader pads the matrix palette with identity, so a
++            // vertex referencing a missing matrix stays at bind pose.
++            if (skel_bone >= matrices.size())
++                continue;
++
++            const XMMATRIX m = XMLoadFloat4x4(&matrices[skel_bone]);
++
++            if (mv.has_position)
++            {
++                XMVECTOR p = XMVector3TransformCoord(XMVectorSet(mv.x, mv.y, mv.z, 1.0f), m);
++                mv.x = XMVectorGetX(p);
++                mv.y = XMVectorGetY(p);
++                mv.z = XMVectorGetZ(p);
++            }
++            if (mv.has_normal)
++                transform_normal_in_place(m, mv.normal_x, mv.normal_y, mv.normal_z);
++            if (mv.has_tangent)
++                transform_normal_in_place(m, mv.tangent_x, mv.tangent_y, mv.tangent_z);
++            if (mv.has_bitangent)
++                transform_normal_in_place(m, mv.bitangent_x, mv.bitangent_y, mv.bitangent_z);
++        }
++    }
++
++    return matrices.size();
++}
++
++// Runs the whole posed export synchronously. Must be called on the render
++// thread (texture PNG export goes through the D3D11 device, same constraint
++// as the full batch export in MapBrowser::Update).
++inline void run(const std::wstring& export_dir, const std::wstring& list_path,
++                float anim_fraction, DATManager* dat_manager,
++                std::unordered_map<int, std::vector<int>>& hash_index,
++                TextureManager* texture_manager)
++{
++    namespace fs = std::filesystem;
++
++    const std::wstring out_dir = export_dir.empty() ? L"." : export_dir;
++    std::error_code ec;
++    fs::create_directories(fs::path(out_dir), ec);
++
++    std::ofstream log(fs::path(out_dir) / "_posed_export_log.txt", std::ios::app);
++    log << std::format("run start: list='{}', anim_fraction={}\n",
++                       narrow(list_path), anim_fraction) << std::flush;
++
++    // Read the hash list (one hex hash per line; '#' starts a comment line).
++    std::vector<uint32_t> hashes;
++    {
++        std::ifstream list_file{fs::path(list_path)};
++        if (!list_file)
++        {
++            log << "ERROR: could not open hash list file\n" << std::flush;
++            return;
++        }
++        std::string line;
++        while (std::getline(list_file, line))
++        {
++            // Trim whitespace/CR.
++            const auto first = line.find_first_not_of(" \t\r\n");
++            if (first == std::string::npos)
++                continue;
++            const auto last = line.find_last_not_of(" \t\r\n");
++            line = line.substr(first, last - first + 1);
++            if (line.empty() || line[0] == '#')
++                continue;
++            try
++            {
++                hashes.push_back(static_cast<uint32_t>(std::stoull(line, nullptr, 16)));
++            }
++            catch (...)
++            {
++                log << std::format("WARN: could not parse hash line '{}'\n", line);
++            }
++        }
++    }
++    log << std::format("{} model hashes listed\n", hashes.size()) << std::flush;
++
++    const auto& mft = dat_manager->get_MFT();
++    int ok = 0, ok_unposed = 0, failed = 0;
++
++    for (const uint32_t hash : hashes)
++    {
++        try
++        {
++            const auto filename = std::format(L"model_0x{:X}_posed_gwmb.json", hash);
++            log << std::format("model 0x{:X}: ", hash);
++
++            if (fs::exists(fs::path(out_dir) / filename))
++            {
++                log << "output already exists -> skipped (delete it to re-export)\n" << std::flush;
++                ok++;
++                continue;
++            }
++
++            // hash -> MFT index (must be an FFNA_Type2 entry).
++            auto it = hash_index.find(static_cast<int>(hash));
++            int mft_index = -1;
++            if (it != hash_index.end())
++            {
++                for (const int candidate : it->second)
++                {
++                    if (mft[candidate].type == FFNA_Type2)
++                    {
++                        mft_index = candidate;
++                        break;
++                    }
++                }
++            }
++            if (mft_index < 0)
++            {
++                log << "FAILED: no FFNA_Type2 entry with this hash in the dat\n" << std::flush;
++                failed++;
++                continue;
++            }
++
++            if (dat_manager->is_other_model_format(mft_index))
++            {
++                log << "FAILED: other (BB8) model format, not supported by the JSON exporter\n"
++                    << std::flush;
++                failed++;
++                continue;
++            }
++
++            auto model_file = dat_manager->parse_ffna_model_file(mft_index);
++            if (!model_file.parsed_correctly)
++            {
++                log << "FAILED: model did not parse correctly\n" << std::flush;
++                failed++;
++                continue;
++            }
++
++            // Locate the animation: same file first, then full-MFT signature scan.
++            std::string anim_source = "NONE";
++            std::optional<GW::Animation::AnimationClip> clip =
++                load_clip_from_same_file(dat_manager, mft_index);
++            if (clip)
++            {
++                anim_source = "same-file";
++            }
++            else
++            {
++                const uint32_t model_hash0 = model_file.geometry_chunk.sub_1.f0xC;
++                const uint32_t model_hash1 = model_file.geometry_chunk.sub_1.f0x10;
++                int donor_hash = 0;
++                clip = scan_mft_for_animation(dat_manager, model_hash0, model_hash1,
++                                              mft_index, donor_hash);
++                if (clip)
++                    anim_source = std::format("0x{:X}", static_cast<uint32_t>(donor_hash));
++            }
++
++            bool posed = false;
++            if (clip)
++            {
++                const PoseTimePick pick = pick_pose_time(*clip, anim_fraction);
++                const size_t matrix_count = bake_pose_into_model(model_file, *clip, pick.time);
++                posed = matrix_count > 0;
++                if (pick.from_segment)
++                {
++                    log << std::format(
++                        "anim={} segment[{}] hash=0x{:08X}{} time={:.1f} bones={} matrices={}",
++                        anim_source, pick.segment_index, pick.segment_hash,
++                        pick.is_idle ? " (idle)" : " (no idle found)", pick.time,
++                        clip->boneTracks.size(), matrix_count);
++                }
++                else
++                {
++                    log << std::format(
++                        "anim={} no segments, whole-clip time={:.1f} bones={} matrices={}",
++                        anim_source, pick.time, clip->boneTracks.size(), matrix_count);
++                }
++            }
++            else
++            {
++                log << "no animation found -> exported unposed";
++            }
++
++            const bool exported = model_exporter::export_model(
++                out_dir, filename, &model_file, dat_manager, hash_index, texture_manager);
++            if (exported)
++            {
++                if (posed)
++                    ok++;
++                else
++                    ok_unposed++;
++                log << " -> exported\n" << std::flush;
++            }
++            else
++            {
++                failed++;
++                log << " -> EXPORT FAILED\n" << std::flush;
++            }
++        }
++        catch (...)
++        {
++            failed++;
++            log << "FAILED: exception\n" << std::flush;
++        }
++    }
++
++    log << std::format("DONE: posed {}, unposed {}, failed {}\n", ok, ok_unposed, failed)
++        << std::flush;
++}
++
++} // namespace posed_export
++
++namespace anim_index {
++
++// Single-pass model<->animation index dump. For every FFNA_Type2 file, records
++// the signature words of each known chunk header:
++//   BB9/FA1 chunks = animation side, FA0/BB8 chunks = geometry side.
++// Offline join: a model is animated iff some file carries a BB9/FA1 chunk with
++// the same (hash0, hash1) pair as the model's geometry chunk.
++inline void dump(const std::wstring& out_csv, DATManager* dat_manager)
++{
++    const std::filesystem::path csv_path(out_csv);
++    std::ofstream csv(csv_path);
++    csv << "chunk,file_hash,hash0,hash1,rigged\n";
++    const auto& mft = dat_manager->get_MFT();
++    int files = 0;
++    for (size_t i = 0; i < mft.size(); ++i)
++    {
++        if (mft[i].type != FFNA_Type2)
++            continue;
++        unsigned char* data = dat_manager->read_file(static_cast<int>(i));
++        if (!data)
++            continue;
++        const size_t data_size = mft[i].uncompressedSize;
++        if (data_size >= 5 + 8 && data[0] == 'f' && data[1] == 'f' && data[2] == 'n' && data[3] == 'a')
++        {
++            size_t offset = 5;
++            while (offset + 8 <= data_size)
++            {
++                uint32_t chunk_id, chunk_size;
++                std::memcpy(&chunk_id, &data[offset], sizeof(uint32_t));
++                std::memcpy(&chunk_size, &data[offset + 4], sizeof(uint32_t));
++                if (chunk_id == 0 || chunk_size == 0)
++                    break;
++                const size_t cdo = offset + 8;
++                if (cdo + chunk_size > data_size)
++                    break;
++                const char* kind = nullptr;
++                uint32_t h0 = 0, h1 = 0;
++                if (chunk_id == GW::Parsers::CHUNK_ID_BB9 || chunk_id == GW::Parsers::CHUNK_ID_BB8)
++                {
++                    if (cdo + sizeof(GW::Parsers::BB9Header) <= data_size)
++                    {
++                        GW::Parsers::BB9Header header;
++                        std::memcpy(&header, &data[cdo], sizeof(header));
++                        h0 = header.modelHash0;
++                        h1 = header.modelHash1;
++                        kind = chunk_id == GW::Parsers::CHUNK_ID_BB9 ? "BB9" : "BB8";
++                    }
++                }
++                else if (chunk_id == GW::Parsers::CHUNK_ID_FA1 || chunk_id == GW::Parsers::CHUNK_ID_FA0)
++                {
++                    if (cdo + sizeof(GW::Parsers::FA1Header) <= data_size)
++                    {
++                        GW::Parsers::FA1Header header;
++                        std::memcpy(&header, &data[cdo], sizeof(header));
++                        h0 = header.boundingBoxId;
++                        h1 = header.collisionMeshId;
++                        kind = chunk_id == GW::Parsers::CHUNK_ID_FA1 ? "FA1" : "FA0";
++                    }
++                }
++                if (kind)
++                    csv << kind << ',' << std::format("{:X}", mft[i].Hash) << ','
++                        << h0 << ',' << h1 << ",\n";
++                offset += 8 + chunk_size;
++            }
++        }
++        delete[] data;
++
++        // Model-side signature requires the real geometry parse: header reads on
++        // FA0/BB8 geometry chunks yield shared garbage, not per-model signatures.
++        try
++        {
++            auto model_file = dat_manager->parse_ffna_model_file(static_cast<int>(i));
++            if (model_file.parsed_correctly && !model_file.geometry_chunk.models.empty())
++            {
++                bool rigged = false;
++                for (const auto& gm : model_file.geometry_chunk.models)
++                {
++                    if (!gm.extra_data.empty() ||
++                        (!gm.vertices.empty() && gm.vertices[0].has_group))
++                    {
++                        rigged = true;
++                        break;
++                    }
++                }
++                csv << "MODEL," << std::format("{:X}", mft[i].Hash) << ','
++                    << model_file.geometry_chunk.sub_1.f0xC << ','
++                    << model_file.geometry_chunk.sub_1.f0x10 << ','
++                    << (rigged ? 1 : 0) << '\n';
++            }
++        }
++        catch (...)
++        {
++        }
++        files++;
++    }
++    csv << "# scanned " << files << " type2 files\n";
++}
++
++} // namespace anim_index
+diff -ruN '--exclude=Release' '--exclude=Debug' '--exclude=.vs' /tmp/gwmb-research/SourceFiles/TextureManager.h /mnt/c/gwmb-batch/src/SourceFiles/TextureManager.h
+--- /tmp/gwmb-research/SourceFiles/TextureManager.h	2026-06-11 20:44:39.262398848 +0200
++++ /mnt/c/gwmb-batch/src/SourceFiles/TextureManager.h	2026-06-11 21:23:32.054972300 +0200
+@@ -331,6 +331,12 @@
+ inline bool SaveTextureToPng(ID3D11ShaderResourceView* texture, std::wstring& filename,
+ 	TextureManager* texture_manager)
+ {
++	if (GetFileAttributesW(filename.c_str()) != INVALID_FILE_ATTRIBUTES)
++	{
++		// Texture already exported to this directory (textures are shared across models)
++		return true;
++	}
++
+ 	HRESULT hr = texture_manager->SaveTextureToFile(texture, filename.c_str());
+ 	if (FAILED(hr))
+ 	{
