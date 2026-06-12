@@ -1,60 +1,32 @@
-# gw1-sprites
+# gw1-bestiary
 
 Isometric NPC sprite library extracted from Guild Wars 1 game data, for the
-[guildwars3 fan site](../guildwars3). Personal fan project — assets are
-ArenaNet's; extracted from a locally-owned install, not redistributed beyond
-fan use ([ArenaNet's informal stance](https://wiki.guildwars.com/wiki/Player-made_Modifications)).
+guildwars3 fan site and shared for community tooling.
+
+> **Attribution & takedown**: all extracted artwork (sprites in `dist/`) is
+> © ArenaNet / NCSoft, derived from Guild Wars game data via
+> [GuildWarsMapBrowser](https://github.com/Jonathan-Greve/GuildWarsMapBrowser).
+> Non-commercial fan project in the spirit of the community's long-standing
+> practice ([ArenaNet's informal stance](https://wiki.guildwars.com/wiki/Player-made_Modifications));
+> assets will be removed immediately on request from the rights holder.
+> Tooling (scripts, app, fork patches) is the author's own.
 
 **Scope: NPCs only.** Items are handled site-side from the official wiki's
 icon corpus (same 64×64 originals, pre-named and pre-linked) — no extraction
 or icon tooling lives here.
 
-## Pipeline
+## Contents
 
 ```
-Gw.dat ──(GWMB fork, Windows)──> model JSONs + textures   C:\gwmb-export
-       └─(--export-icons-dir)──> inventory icons          C:\gwmb-icons
-model JSONs ──(Blender headless)──> isometric sprites     out/scan (256px), out/hires (512px)
-sprites ──(classify + human validation in app)──> validated set   out/validation.json
-validated set ──(build_dist.py)──> deliverable            dist/npc.jsonl + dist/npc/
+npc.jsonl   one NPC per line: { id, model, title, name, wiki, sprite, tags, categories, stats }
+npc/        isometric sprites, 512px PNG, transparent background, 2:1 dimetric
 ```
 
-- **Extraction**: fork of [GuildWarsMapBrowser](https://github.com/Jonathan-Greve/GuildWarsMapBrowser)
-  at `C:\gwmb-batch\src` with CLI batch export (`--dat`, `--export-models-dir`,
-  `--export-icons-dir`, `--export-posed`, `--dump-anim-index`, `--exit-when-done`,
-  crash-resilient). Windows-only (DirectX 11); build Release|Win32 with VS Build
-  Tools, `/p:PlatformToolset=v143`.
-- **Rendering**: `scripts/render_isometric.py` via headless Blender
-  (`/workspace/tools/blender`). Standards: 2:1 dimetric (60°), `--base-azimuth 135`
-  (front, facing right), light rig key 2.2 / fill 0.7 / rim 1.1 / ambient 0.22,
-  `--bloom` for emissive glow, Cycles CPU. Final quality: 512px / 48 samples.
-  GWMB Blender addon (patched copy) in `gwmb_addon/`.
-- **Admin app**: `app/` (SvelteKit, `npm run dev` → http://localhost:5301):
-  gallery + validation at `/`, wiki-link editor at `/link`.
-  Owns `out/validation.json` and `out/links.json`.
-- **Build**: `python3 build_dist.py` → `dist/npc.jsonl` (one NPC per line,
-  stable uuid5 ids) + `dist/npc/*.png` (hires preferred).
+- `id` — stable UUID (never changes between releases)
+- `model` — Gw.dat file hash of the 3D model (e.g. `0x1C817`)
+- `name`/`wiki` — filled progressively via community data and manual curation
+- Sprites are bind-pose, front-facing, rendered from the original game geometry
+  and textures (high LOD, emissive glow layers included)
 
-## Decisions of record
-
-- Bind pose (T-pose) sprites — pose-baked idle exists in the fork but frozen
-  animation frames look worse than neutral bind pose.
-- Manual validation only — no reliable offline "is a creature" signal in the
-  dat (bone markers exist on everything; animation signatures collapse into
-  shared rig families).
-- Armor pieces, capes, and modular multi-part units are out of scope (dye
-  textures and unit composition are runtime/server data).
-- 512px finals; 256px for triage scans.
-
-## Layout
-
-```
-build_dist.py        build the deliverable from validated state
-app/                 SvelteKit admin (gallery + wiki linking)
-gwmb_addon/          patched GWMB Blender import addon
-scripts/             pipeline tools (render, scan, classify)
-out/                 working state: validation.json, links.json, *.csv (tracked);
-                     scan/, hires/ sprite caches (untracked)
-dist/                deliverable (untracked, regenerable)
-wiki-icons/          downloaded wiki icon corpus (untracked)
-```
+Produced by a private pipeline (GWMB-fork batch extraction → headless Blender →
+human validation). 1,502 NPCs validated by hand out of ~34k models in the dat.
