@@ -1,0 +1,144 @@
+<!doctype html><meta charset=utf8><title>GW1 sprite gallery</title>
+<style>
+body{background:#26262c;color:#ddd;font-family:system-ui;margin:0}
+header{position:sticky;top:0;background:#1c1c20;padding:8px 10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;z-index:2}
+input{background:#333;border:1px solid #555;color:#eee;padding:6px 10px;border-radius:6px;width:220px}
+button,.chip{background:#444;border:1px solid #666;color:#eee;padding:5px 10px;border-radius:14px;cursor:pointer;font-size:12px}
+.chip.on{background:#2d6cdf;border-color:#5b93f5}
+button.mode.on{background:#1d8a44;border-color:#39c46c}
+#grid{padding:10px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;gap:8px;align-items:stretch}
+.rowbtn{width:34px;flex:none;background:#3a3a42;border:1px solid #555;border-radius:8px;color:#9c9;cursor:pointer;font-size:16px}
+.c{background:#3a3a42;border-radius:8px;padding:6px;text-align:center;position:relative;cursor:pointer;width:170px;flex:none}
+.c.sel{outline:3px solid #2d6cdf}
+.c img.sprite{width:100%;background:#4a4a52;border-radius:4px}
+.c img.icon{position:absolute;top:10px;right:10px;width:36px;border:1px solid #222;border-radius:4px;background:#222}
+.h{font-size:11px;color:#aaa}.n{font-size:12px;color:#ffd87a;min-height:15px}
+.k{font-size:10px;color:#9ad;text-transform:uppercase}.k.manual{color:#f9a}
+.validate .c{opacity:.45}
+.validate .c.ok{opacity:1;outline:3px solid #2fbf5f}
+.c .tick{display:none;position:absolute;top:8px;left:8px;font-size:20px;color:#2fbf5f;text-shadow:0 0 4px #000}
+.validate .c.ok .tick{display:block}
+#saved{color:#7c7;font-size:12px}
+footer{position:fixed;bottom:0;left:0;right:0;background:#1c1c20;padding:6px 10px;font-size:12px;color:#aaa}
+</style>
+<header><b>GW1 sprites</b><input id=q placeholder="filter hash or name">
+<span id=chips></span><span id=count></span>
+<button id=modeBtn class=mode onclick=toggleMode()>✓ validate NPCs</button>
+<button onclick=load()>reload</button><span id=saved></span>
+<a href=light-compare.png style="color:#8cf">A/B</a></header>
+<div id=grid></div>
+<footer id=foot>browse mode — click card to select, press 1 npc / 2 item / 3 building / 4 small / 5 terrain / 6 part / 7 unclear / 0 clear override — all changes save to the server instantly</footer>
+<script>
+const CLASSES=['npc','item','building','small','terrain','part','unclear'];
+const COLS=6;
+let meta={},items=[],filterCls='all',selected=null,validateMode=false;
+let npcOk={},overrides={};
+const grid=document.getElementById('grid'),q=document.getElementById('q'),
+      count=document.getElementById('count'),chips=document.getElementById('chips'),
+      modeBtn=document.getElementById('modeBtn'),foot=document.getElementById('foot'),
+      saved=document.getElementById('saved');
+function cls(i){return overrides[i.h]||((meta[i.h]||{}).cls)||'unknown'}
+let saveTimer=null;
+function flash(msg){saved.textContent=msg;clearTimeout(saveTimer);saveTimer=setTimeout(()=>saved.textContent='',1500)}
+async function post(body){
+  try{const r=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();flash(`saved ✓ (${j.npcOk} npc, ${j.overrides} labels)`);}
+  catch(e){flash('SAVE FAILED — is the server running?')}
+}
+async function load(){
+  const st=await (await fetch('/api/state')).json();
+  npcOk=st.npcOk||{};overrides=st.overrides||{};
+  // one-time migration of old browser-local marks
+  const oldOk=JSON.parse(localStorage.gw1npcok||'{}'),oldOv=JSON.parse(localStorage.gw1labels||'{}');
+  if((Object.keys(oldOk).length||Object.keys(oldOv).length)){
+    Object.assign(npcOk,oldOk);Object.assign(overrides,oldOv);
+    await post({merge:{npcOk:oldOk,overrides:oldOv}});
+    localStorage.removeItem('gw1npcok');localStorage.removeItem('gw1labels');
+  }
+  const csv=await (await fetch('classifications.csv?'+Date.now())).text();
+  csv.split('\n').slice(1).forEach(l=>{const p=l.split(',');
+    if(p.length>=5) meta[p[0]]={cls:p[1],src:p[2],name:p[3],icon:p[4],score:parseFloat(p[5])||0,verts:p[6]||'?',parts:p[7]||'?',ntex:p[8]||'?',height:p[9]||'?'}});
+  const txt=await (await fetch('scan/?'+Date.now())).text();
+  const files=[...txt.matchAll(/href="(model_[^"]+_gwmb\.png)"/g)].map(m=>m[1]);
+  items=files.map(f=>{const h=f.replace('model_','').replace('_gwmb.png','');
+    return {f,h}}).sort((a,b)=>a.h.localeCompare(b.h));
+  render();
+}
+function toggleMode(){
+  validateMode=!validateMode;
+  modeBtn.classList.toggle('on',validateMode);
+  if(validateMode){
+    foot.textContent='validate mode — click card = toggle REAL NPC, ✓ button = toggle whole row; sorted most-NPC-like first; saves instantly';}
+  else foot.textContent='browse mode — click card to select, press 1 npc / 2 item / 3 building / 4 small / 5 terrain / 6 part / 7 unclear / 0 clear override — all changes save to the server instantly';
+  render();
+}
+function cardHtml(i){
+  const m=meta[i.h]||{};
+  const man=overrides[i.h]?' manual':'';
+  return `<div class="c ${validateMode&&npcOk[i.h]?'ok':''} ${(!validateMode&&selected===i.h)?'sel':''}"
+    title="${i.h} — ${m.verts} verts, ${m.parts} parts, ${m.ntex} textures, height ${m.height}, npc-score ${m.score}"
+    onclick="clickCard('${i.h}')"><span class=tick>✓</span>
+    <img class=sprite loading=lazy src="scan/${i.f}">
+    ${m.icon?`<img class=icon loading=lazy src="icons/${m.icon}">`:''}
+    <div class="k${man}">${cls(i)}${man?' ✎':''}</div>
+    <div class=n>${m.name||''}</div><div class=h>${i.h}</div></div>`;
+}
+let lastSel=[];
+function render(){
+  const t=q.value.toLowerCase();
+  const sel=items.filter(i=>{
+    const m=meta[i.h]||{};
+    if(filterCls==='validated'){if(!npcOk[i.h])return false;}
+    else if(filterCls!=='all'&&cls(i)!==filterCls)return false;
+    return !t||i.h.toLowerCase().includes(t)||(m.name||'').toLowerCase().includes(t);
+  });
+  if(validateMode)sel.sort((a,b)=>((meta[b.h]||{}).score||0)-((meta[a.h]||{}).score||0));
+  lastSel=sel;
+  const tot={all:items.length};
+  items.forEach(i=>{const c=cls(i);tot[c]=(tot[c]||0)+1});
+  tot['validated']=items.filter(i=>npcOk[i.h]).length;
+  chips.innerHTML=['all','validated',...CLASSES].map(c=>
+    `<span class="chip ${filterCls===c?'on':''}" onclick="filterCls='${c}';render()">${c} ${tot[c]||0}</span>`).join(' ');
+  count.textContent=sel.length+' shown'+(validateMode?` — sorted by npc-likeness — ${Object.keys(npcOk).length} confirmed npc`:' — hash order');
+  grid.className=validateMode?'validate':'';
+  const cap=4000;
+  const shown=sel.slice(0,cap);
+  let out=[];
+  for(let r=0;r<shown.length;r+=COLS){
+    out.push(`<div class=row>${validateMode?`<button class=rowbtn onclick="toggleRow(${r})" title="toggle row">✓</button>`:''}
+      ${shown.slice(r,r+COLS).map(cardHtml).join('')}</div>`);
+  }
+  grid.innerHTML=out.join('');
+}
+function clickCard(h){
+  if(validateMode){
+    const v=npcOk[h]?null:1;
+    if(v)npcOk[h]=1;else delete npcOk[h];
+    post({op:{kind:'npcOk',hash:h,value:v}});
+  } else selected=h;
+  render();
+}
+function toggleRow(start){
+  const rowItems=lastSel.slice(start,start+COLS);
+  const allOn=rowItems.every(i=>npcOk[i.h]);
+  const m={};
+  rowItems.forEach(i=>{
+    if(allOn){delete npcOk[i.h];post({op:{kind:'npcOk',hash:i.h,value:null}});}
+    else{npcOk[i.h]=1;m[i.h]=1;}
+  });
+  if(!allOn)post({merge:{npcOk:m}});
+  render();
+}
+document.addEventListener('keydown',e=>{
+  if(validateMode||!selected||e.target.tagName==='INPUT')return;
+  let v=null;
+  if(e.key!=='0'){const idx=parseInt(e.key)-1;
+    if(isNaN(idx)||idx<0||idx>=CLASSES.length)return;
+    v=CLASSES[idx];}
+  if(v)overrides[selected]=v;else delete overrides[selected];
+  post({op:{kind:'override',hash:selected,value:v}});
+  render();
+});
+q.oninput=render;load();
+</script>
