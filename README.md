@@ -5,9 +5,9 @@ Isometric NPC sprite library extracted from Guild Wars 1 game data, for the
 ArenaNet's; extracted from a locally-owned install, not redistributed beyond
 fan use ([ArenaNet's informal stance](https://wiki.guildwars.com/wiki/Player-made_Modifications)).
 
-**Scope: NPCs only.** Items are wiki-sourced (the official wiki hosts the same
-64×64 inventory icons, pre-named and pre-linked) and belong to the site
-pipeline — see `scripts/wiki/` until that moves out.
+**Scope: NPCs only.** Items are handled site-side from the official wiki's
+icon corpus (same 64×64 originals, pre-named and pre-linked) — no extraction
+or icon tooling lives here.
 
 ## Pipeline
 
@@ -53,7 +53,6 @@ build_dist.py        build the deliverable from validated state
 app/                 SvelteKit admin (gallery + wiki linking)
 gwmb_addon/          patched GWMB Blender import addon
 scripts/             pipeline tools (render, scan, classify)
-scripts/wiki/        wiki icon corpus tooling (items — site-bound)
 out/                 working state: validation.json, links.json, *.csv (tracked);
                      scan/, hires/ sprite caches (untracked)
 dist/                deliverable (untracked, regenerable)
