@@ -1,1 +1,5 @@
 out
+
+# local npc.jsonl backups (made by sync / by hand) — never commit
+npc.jsonl.bak*
+npc.jsonl.presync-*
