@@ -1,6 +1,6 @@
 {
   "name": "@geptyro/gw1-bestiary",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Isometric NPC sprite library extracted from Guild Wars 1 game data (data + 512px sprites). Non-commercial fan project.",
   "license": "SEE LICENSE IN README.md",
   "homepage": "https://github.com/Geptyro/gw1-bestiary",
